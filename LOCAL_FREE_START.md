@@ -1,15 +1,15 @@
-# Local Free Start
+# Local Live Start
 
-The free starter backend is running in this session at:
+The local live backend normally runs at:
 
-- Website/API: `http://127.0.0.1:4180/`
-- Health check: `http://127.0.0.1:4180/api/health`
-- Contracts API: `http://127.0.0.1:4180/api/contracts`
-- OCR jobs API: `http://127.0.0.1:4180/api/ocr-jobs`
+- Website/API: `http://127.0.0.1:4182/`
+- Health check: `http://127.0.0.1:4182/api/health`
+- Contracts API: `http://127.0.0.1:4182/api/contracts`
+- OCR jobs API: `http://127.0.0.1:4182/api/ocr-jobs`
 
-The existing visual prototype is still available at:
+Use the server URL, not the raw `index.html` file, when testing uploads, OCR, login, users, reports, backups, weather, and deletes.
 
-- `http://127.0.0.1:4174/`
+The raw HTML file is only useful for a visual preview and cannot run backend features.
 
 ## What Is Set Up
 
@@ -19,9 +19,9 @@ The existing visual prototype is still available at:
    - No paid service
 
 2. Local data storage
-   - Folder: `data/`
-   - Contracts, facilities, vendors, alerts, and OCR jobs are JSON files
-   - Free starter replacement for a database
+   - Database: `data/contracts.sqlite`
+   - Contracts and OCR jobs are stored in SQLite
+   - Real users, contracts, tasks, invoices, OCR jobs, vendor profiles, and audit logs are stored in SQLite
 
 3. ShareSync intake endpoint
    - `POST /api/sharesync-intake`
@@ -33,15 +33,9 @@ The existing visual prototype is still available at:
    - Paginates results
 
 5. OCR job queue
-   - `data/ocr-jobs.json`
-   - Ready for Tesseract worker connection
+   - Table: `ocr_jobs`
+   - Runs Tesseract OCR and stores extracted text previews
 
-## Next Free Build Step
+## Next Live Build Step
 
-Connect the visual prototype to this backend:
-
-- Upload/Paste ShareSync link calls `/api/sharesync-intake`
-- Contracts page calls `/api/contracts`
-- Review Queue calls `/api/ocr-jobs`
-
-Then add a Tesseract worker to process queued OCR jobs.
+Decide whether uploaded contract PDFs should stay in the app upload folder, copy into a ShareSync folder, or both.

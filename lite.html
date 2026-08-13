@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Contract Operations Lite</title>
+  <link rel="stylesheet" href="/styles.css?v=freeze-fix-zero-23" />
+  <style>
+    body { background:#f6f8fb; color:#0f172a; font-family:Inter, Arial, sans-serif; margin:0; }
+    .lite-shell { max-width:980px; margin:0 auto; padding:36px 20px; }
+    .lite-head { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:22px; }
+    .lite-logo { display:flex; align-items:center; gap:12px; }
+    .lite-mark { width:40px; height:40px; border-radius:10px; background:#1f5eff; color:white; display:grid; place-items:center; font-weight:800; }
+    .lite-card { background:white; border:1px solid #dbe3ef; border-radius:12px; padding:18px; box-shadow:0 14px 36px rgba(15,23,42,.08); margin-bottom:14px; }
+    .lite-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+    .lite-btn { display:inline-flex; align-items:center; justify-content:center; border:1px solid #c9d5e7; border-radius:10px; padding:11px 14px; background:white; color:#0f172a; text-decoration:none; font-weight:800; cursor:pointer; }
+    .lite-btn.primary { background:#1f5eff; color:white; border-color:#1f5eff; }
+    .lite-status { font-size:14px; color:#52627a; }
+    .lite-kpi { font-size:32px; font-weight:900; margin:6px 0 2px; }
+    .ok { color:#027a48; font-weight:800; }
+    .bad { color:#b42318; font-weight:800; }
+  </style>
+</head>
+<body>
+  <main class="lite-shell">
+    <div class="lite-head">
+      <div class="lite-logo">
+        <div class="lite-mark">CO</div>
+        <div>
+          <h1 style="margin:0;font-size:26px">Contract Operations</h1>
+          <div class="lite-status">Lite recovery page</div>
+        </div>
+      </div>
+      <a class="lite-btn primary" href="/?v=freeze-fix-zero-23#dashboard">Open Full App</a>
+    </div>
+
+    <section class="lite-card">
+      <h2 style="margin-top:0">Server Check</h2>
+      <div id="serverStatus" class="lite-status">Checking...</div>
+      <div class="lite-grid" style="margin-top:12px">
+        <div><div class="lite-status">Contracts</div><div class="lite-kpi" id="contractCount">-</div></div>
+        <div><div class="lite-status">Needs Attention</div><div class="lite-kpi" id="attentionCount">-</div></div>
+        <div><div class="lite-status">Annual Spend</div><div class="lite-kpi" id="annualSpend">-</div></div>
+      </div>
+    </section>
+
+    <section class="lite-card">
+      <h2 style="margin-top:0">Quick Links</h2>
+      <div class="lite-grid">
+        <a class="lite-btn" href="/?v=freeze-fix-zero-23#upload">Upload</a>
+        <a class="lite-btn" href="/?v=freeze-fix-zero-23#contracts">Contracts</a>
+        <a class="lite-btn" href="/?v=freeze-fix-zero-23#review">Review Queue</a>
+        <a class="lite-btn" href="/?v=freeze-fix-zero-23#ocrqueue">OCR Queue</a>
+      </div>
+    </section>
+
+    <section class="lite-card">
+      <h2 style="margin-top:0">If Full App Freezes</h2>
+      <p class="lite-status">Close the frozen tab first. Then open this lite page again. This page avoids the large app script, so it should stay responsive.</p>
+    </section>
+  </main>
+  <script>
+    async function loadLiteStatus() {
+      try {
+        const health = await fetch("/api/health").then(r => r.json());
+        const dash = await fetch("/api/dashboard").then(r => r.json()).catch(() => ({}));
+        document.getElementById("serverStatus").innerHTML = health.ok ? '<span class="ok">Server connected</span>' : '<span class="bad">Server issue</span>';
+        document.getElementById("contractCount").textContent = dash.totalContracts || dash.activeContracts || 0;
+        document.getElementById("attentionCount").textContent = dash.criticalActions || 0;
+        document.getElementById("annualSpend").textContent = dash.annualSpendLabel || "$0";
+      } catch (error) {
+        document.getElementById("serverStatus").innerHTML = '<span class="bad">Server not reachable</span>';
+      }
+    }
+    loadLiteStatus();
+  </script>
+</body>
+</html>

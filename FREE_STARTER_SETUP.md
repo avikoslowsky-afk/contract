@@ -5,7 +5,7 @@ This starter keeps costs at zero while proving the workflow.
 ## Free Components
 
 - App hosting: local computer or internal network computer
-- Database: JSON files to start, upgrade to SQLite/PostgreSQL later
+- Database: SQLite local database, upgrade to PostgreSQL later
 - OCR: Tesseract OCR, free/open source
 - File storage: ShareSync remains source of truth
 - Search: local text search to start
@@ -26,18 +26,17 @@ This starter keeps costs at zero while proving the workflow.
 ## Files
 
 - `server.mjs`: free local backend API using built-in Node only.
-- `data/contracts.json`: local contract records.
-- `data/facilities.json`: facility records with bed counts.
-- `data/vendors.json`: vendor records.
-- `data/alerts.json`: renewal/exception alert queue.
-- `data/ocr-jobs.json`: OCR job queue.
+- `data/contracts.sqlite`: local SQLite database for contract records and OCR jobs.
+- `data/facilities.json`: starter facility records with bed counts.
+- `data/vendors.json`: starter vendor records.
+- `data/alerts.json`: starter renewal/exception alert queue.
 
 ## What Is Real vs Placeholder
 
 Real now:
 
 - Local backend structure
-- Local data files
+- Local SQLite database
 - Contract/search API
 - ShareSync link intake record
 - OCR job queue

@@ -1,0 +1,23 @@
+services:
+  contract-operations:
+    build: .
+    container_name: contract-operations
+    restart: unless-stopped
+    ports:
+      - "${PORT:-4182}:4182"
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4182
+      TESSERACT_PATH: /usr/bin/tesseract
+      PDFTOPPM_PATH: /usr/bin/pdftoppm
+      PDFINFO_PATH: /usr/bin/pdfinfo
+      PYTHON_PATH: /usr/bin/python3
+    volumes:
+      - contract-data:/app/data
+      - contract-uploads:/app/uploads
+
+volumes:
+  contract-data:
+  contract-uploads:
