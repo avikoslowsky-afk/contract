@@ -1281,6 +1281,10 @@
               <div class="field"><label>Email connection</label><input id="adminSmtpStatus" value="Checking email settings" readonly /></div>
               <div class="field"><label>Test recipient</label><input id="adminSmtpTestTo" type="email" placeholder="your.name@company.com" /></div>
               <div class="field"><label>Alert schedule</label><input id="adminAlertSchedule" value="90, 60, 30 days" /></div>
+              <div class="field" style="grid-column:1/-1"><label>Recipients and facilities</label><div id="renewalAssignments"></div><button class="btn" type="button" id="addRenewalRecipient">Add Recipient</button></div>
+              <div class="field"><label for="renewalAppUrl">Contract link address</label><input id="renewalAppUrl" type="url" placeholder="https://contracts.yourcompany.com/" /></div>
+              <div class="field"><label><input id="renewalEmailEnabled" type="checkbox" /> Enable automatic renewal emails</label></div>
+              <div class="field" style="grid-column:1/-1"><button class="btn" id="previewRenewalEmail" type="button">Preview Renewal Emails</button><div id="renewalEmailPreview" aria-live="polite"></div></div>
               <div class="field"><label>Network access</label><select id="adminNetworkAccess"><option>Company network/VPN only</option><option>Private IP allowlist</option><option>Zero Trust access proxy</option></select></div>
               <div class="field"><label>Public internet</label><select id="adminPublicAccess"><option>Blocked</option><option>Admin exception only</option></select></div>
               <div class="admin-actions"><button class="btn primary" id="saveAdminSettingsButton">Save Settings</button><button class="btn" id="testSmtpButton" type="button">Send Test Email</button></div>

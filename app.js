@@ -2748,6 +2748,7 @@ try {
         setLoginMessage(`Signed in as ${result.user || user}.`);
         showToast(`Signed in as ${result.user || user}.`);
         await loadBackendData();
+        await openEmailDestination();
       } catch (error) {
         showLoginScreen(error.message || "Sign in failed.");
         setLoginMessage(error.message || "Sign in failed.", "error");
@@ -3651,7 +3652,21 @@ try {
       return (values || []).map(value => labels.get(value) || value).filter(Boolean);
     }
 
+    function addRenewalRecipient(row = {}) {
+      const container = document.getElementById('renewalAssignments');
+      const entry = document.createElement('div');
+      entry.className = 'renewal-recipient';
+      entry.style.cssText = 'padding:12px 0;border-bottom:1px solid #ddd';
+      const names = [...new Set([...facilities.map(f => f.name), ...(adminSettings.facilityProfiles || []).map(f=>f.name), ...(row.facilities || [])].filter(Boolean))].sort();
+      entry.innerHTML = `<label>Email <input type="email" class="renewal-email" placeholder="teammate@company.com" value="${escapeHtml(row.email || '')}"></label><details><summary>Assigned facilities</summary><div style="max-height:220px;overflow:auto">${names.map(name=>`<label style="display:block;padding:4px"><input type="checkbox" value="${escapeHtml(name)}" ${(row.facilities || []).includes(name)?'checked':''}> ${escapeHtml(name)}</label>`).join('')}</div></details><button type="button" class="btn danger">Remove Recipient</button>`;
+      entry.querySelector('button').addEventListener('click', () => entry.remove());
+      container.append(entry);
+    }
     function renderAdminSettings() {
+      document.getElementById('renewalAssignments').replaceChildren();
+      (adminSettings.renewalAssignments || []).forEach(addRenewalRecipient);
+      document.getElementById("renewalAppUrl").value = adminSettings.renewalAppUrl || "";
+      document.getElementById("renewalEmailEnabled").checked = adminSettings.renewalEmailEnabled === true;
       document.getElementById("adminShareSyncRoot").value = adminSettings.shareSyncRoot || "/Contracts/";
       document.getElementById("adminEmailSender").value = adminSettings.emailSender || "contracts@company.com";
       document.getElementById("adminAlertSchedule").value = adminSettings.alertSchedule || "90, 60, 30 days";
@@ -3722,6 +3737,9 @@ try {
     function collectAdminSettings() {
       return {
         ...adminSettings,
+        renewalAssignments: [...document.querySelectorAll('.renewal-recipient')].map(row => ({email:row.querySelector('.renewal-email').value.trim(), facilities:[...row.querySelectorAll('input[type=checkbox]:checked')].map(el=>el.value)})),
+        renewalAppUrl: document.getElementById("renewalAppUrl").value.trim(),
+        renewalEmailEnabled: document.getElementById("renewalEmailEnabled").checked,
         shareSyncRoot: document.getElementById("adminShareSyncRoot").value.trim() || "/Contracts/",
         emailSender: document.getElementById("adminEmailSender").value.trim() || "contracts@company.com",
         alertSchedule: document.getElementById("adminAlertSchedule").value.trim() || "90, 60, 30 days",
@@ -4375,6 +4393,8 @@ try {
       }
       if (result.contract) {
         result.contract = await applyPendingBuilderTermsToUploadedContract(result.contract);
+        reviewQueuePage = 1;
+        reviewSummaryData = null;
       }
       if (item) {
         item.contractId = result.contract?.id || "";
@@ -4481,6 +4501,8 @@ try {
           if (result.existingContract?.id) openContract(result.existingContract.id);
           return;
         }
+        reviewQueuePage = 1;
+        reviewSummaryData = null;
         upsertLiveContract(result.contract);
         ocrJobs = [result.ocrJob, ...ocrJobs].filter(Boolean);
         switchSection("review");
@@ -6035,13 +6057,18 @@ try {
       return /\b(approved|submitted|terminated|archived|replaced|ai reviewed)\b/i.test(String(status || ""));
     }
 
+    function newestReviewFirst(a, b) {
+      const time = item => Date.parse(item.createdAt || item.updatedAt || "") || 0;
+      return time(b) - time(a) || String(b.id || "").localeCompare(String(a.id || ""));
+    }
+
     function visibleReviewJobs(excludeContractId = "") {
       return ocrJobs.filter(job => {
         if (excludeContractId && (job.contractId === excludeContractId || job.contract_id === excludeContractId)) return false;
         const contract = contractForJob(job);
         const combinedStatus = `${contract.status || ""} ${contract.reviewStatus || ""} ${job.reviewStatus || ""}`;
         return !isReviewSubmittedStatus(combinedStatus);
-      });
+      }).sort((a, b) => newestReviewFirst(contractForJob(a).id ? contractForJob(a) : a, contractForJob(b).id ? contractForJob(b) : b));
     }
 
     function nextReviewJob(excludeContractId = "") {
@@ -6081,7 +6108,7 @@ try {
           shareSyncUrl: contract.shareSyncUrl || "",
           createdAt: contract.createdAt,
           updatedAt: contract.updatedAt
-        }));
+        })).sort(newestReviewFirst);
     }
 
     function reviewFieldFromJob(job, label) {
@@ -8071,6 +8098,7 @@ try {
       const freshMs = 30000;
       if (section === "dashboard") return backendOnline && (!dashboardLiveLoaded || (dashboardLiveLoadedAt && now - dashboardLiveLoadedAt > freshMs));
       if (section === "upload") return false;
+      if (section === "reports") return backendOnline && (!reportsDataLoadedAt || now - reportsDataLoadedAt >= 60000);
       const loadedAt = liveDataLoadedAtBySection[section] || 0;
       if (section === "finance") return backendOnline && !financeSummaryData && !loadedAt;
       if (section === "categories") return backendOnline && !servicesSummaryData && !loadedAt;
@@ -14689,7 +14717,40 @@ try {
     } else {
       renderSectionContent("dashboard");
     }
-    checkAuthStatus().catch(error => {
+    document.getElementById('addRenewalRecipient')?.addEventListener('click', () => addRenewalRecipient());
+    document.getElementById("previewRenewalEmail")?.addEventListener("click", async () => {
+      const preview = document.getElementById("renewalEmailPreview");
+      preview.textContent = "Preparing preview...";
+      try {
+        const result = await apiJson('/api/email/renewal-preview', {method:'POST', body:JSON.stringify(collectAdminSettings())});
+        preview.textContent = result.previews.length ? `Email connection: ${result.configured ? 'Configured' : 'Not configured'}` : 'Add a recipient and select their facilities first.';
+        for (const item of result.previews) {
+          const title = document.createElement('h4');
+          title.textContent = `To: ${item.email} (${item.count} contracts)`;
+          const frame = document.createElement('iframe');
+          frame.title = `Email preview for ${item.email}`;
+          frame.setAttribute('sandbox', '');
+          frame.style.cssText = 'width:100%;height:540px;border:1px solid #ddd';
+          frame.srcdoc = item.html;
+          preview.append(title, frame);
+        }
+      } catch (error) { preview.textContent = error.message || 'Unable to prepare preview.'; }
+    });
+    async function openEmailDestination() {
+      const contractId = new URLSearchParams(location.search).get('contract');
+      if (contractId && currentUser) {
+        try {
+        if (new URLSearchParams(location.search).get('view') === 'vendor') {
+          const contract = await apiJson(`/api/contracts/${encodeURIComponent(contractId)}`);
+          if (contract.vendor && !/^needs classification$/i.test(contract.vendor.trim())) await openVendor(contract.vendor);
+          else showToast('This contract does not have a confirmed vendor yet.');
+        } else await openContract(contractId);
+        } catch { showToast('Unable to open this email link. Check your access to the contract.'); }
+      }
+    }
+    checkAuthStatus().then(async authenticated => {
+      if (authenticated) await openEmailDestination();
+    }).catch(error => {
       reportClientError("Auth status check failed", error?.stack || error || "");
     });
     const invoiceUploadStatus = document.getElementById("invoiceUploadStatus");

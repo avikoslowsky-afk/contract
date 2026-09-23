@@ -8,6 +8,7 @@
     "start:network": "HOST=0.0.0.0 PORT=4182 node server.mjs",
     "check": "node --check server.mjs && node --check app.js && node --check scripts/smoke-test.mjs && node --check scripts/load-test.mjs",
     "smoke": "node scripts/smoke-test.mjs",
+    "test": "node scripts/review-learning-test.mjs && node scripts/review-order-test.mjs && node scripts/renewal-email-test.mjs",
     "load-test": "node scripts/load-test.mjs"
   },
   "engines": {

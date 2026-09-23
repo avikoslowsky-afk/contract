@@ -1,4 +1,6 @@
 import http from "node:http";
+import { preferredFacilityFolder } from "./sharesync-folder-map.mjs";
+import { reminderSettings, reminderItems, reminderText, recipientItems, reminderHtml } from "./renewal-email.mjs";
 import { execFile } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { constants as fsConstants } from "node:fs";
@@ -348,6 +350,7 @@ function initDatabase() {
       ocr_text_preview TEXT,
       created_at TEXT,
       updated_at TEXT,
+      compact_data TEXT,
       data TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS ocr_jobs (
@@ -467,6 +470,8 @@ function initDatabase() {
       data TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_contracts_search ON contracts(name, facility, vendor, category, status);
+    CREATE INDEX IF NOT EXISTS idx_contracts_created ON contracts(created_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_contracts_name_sort ON contracts(lower(name), created_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_contracts_status_updated ON contracts(status, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_contracts_review_status ON contracts(review_status, status, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_ocr_jobs_contract ON ocr_jobs(contract_id);
@@ -481,6 +486,28 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_learning_rules_label ON learning_rules(label, value);
     CREATE VIRTUAL TABLE IF NOT EXISTS contracts_fts USING fts5(contract_id UNINDEXED, search_text);
   `);
+}
+
+function initializeCompactContractIndex() {
+  const columns = new Set(db.prepare("PRAGMA table_info(contracts)").all().map(column => column.name));
+  if (!columns.has("compact_data")) db.exec("ALTER TABLE contracts ADD COLUMN compact_data TEXT");
+  const pending = db.prepare("SELECT id, data FROM contracts WHERE compact_data IS NULL OR compact_data = ''").all();
+  if (!pending.length) return;
+  const update = db.prepare("UPDATE contracts SET compact_data = ? WHERE id = ?");
+  db.exec("BEGIN");
+  try {
+    for (const row of pending) {
+      try {
+        update.run(JSON.stringify(contractCompactSummary(rowToRecord(row))), row.id);
+      } catch {
+        update.run("{}", row.id);
+      }
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 function contractColumns(contract) {
@@ -499,6 +526,7 @@ function contractColumns(contract) {
     contract.ocrTextPreview || "",
     contract.createdAt || "",
     contract.updatedAt || "",
+    JSON.stringify(contractCompactSummary(contract)),
     JSON.stringify(contract)
   ];
 }
@@ -990,6 +1018,7 @@ function getAdminSettings() {
 }
 
 function saveAdminSettings(settings = {}) {
+  reminderSettings({ ...getAdminSettings(), ...settings });
   const current = getAdminSettings();
   const next = {
     ...current,
@@ -1015,8 +1044,8 @@ function saveContract(contract) {
   db.prepare(`
     INSERT INTO contracts (
       id, name, facility, vendor, category, status, review_status, risk, owner,
-      share_sync_url, local_file_path, ocr_text_preview, created_at, updated_at, data
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      share_sync_url, local_file_path, ocr_text_preview, created_at, updated_at, compact_data, data
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       facility = excluded.facility,
@@ -1031,6 +1060,7 @@ function saveContract(contract) {
       ocr_text_preview = excluded.ocr_text_preview,
       created_at = excluded.created_at,
       updated_at = excluded.updated_at,
+      compact_data = excluded.compact_data,
       data = excluded.data
   `).run(...contractColumns(contract));
   indexContractForSearch(contract);
@@ -1375,35 +1405,54 @@ function applyLearningRules(fields, text) {
   const cleanText = normalizeNameForMatch(text);
   const sourceText = cleanOcrText(text);
   const next = [...fields];
+  const candidates = new Map();
+  const containsWords = (haystack, needle) => {
+    const words = normalizeNameForMatch(needle).trim();
+    return Boolean(words) && ` ${haystack} `.includes(` ${words} `);
+  };
   const supportCounts = new Map();
   for (const rule of rules) {
     const key = `${canonicalContractKeyLabel(rule.label).toLowerCase()}|${normalizeNameForMatch(rule.value)}`;
-    if (!key.endsWith("|")) supportCounts.set(key, (supportCounts.get(key) || 0) + 1);
+    if (!key.endsWith("|")) {
+      const examples = supportCounts.get(key) || new Set();
+      if (rule.contractId) examples.add(rule.contractId);
+      supportCounts.set(key, examples);
+    }
   }
   for (const rule of rules) {
-    const tokens = Array.isArray(rule.tokens) ? rule.tokens : [];
-    const hits = tokens.filter(token => cleanText.includes(normalizeNameForMatch(token))).length;
+    const tokens = [...new Set((Array.isArray(rule.tokens) ? rule.tokens : [])
+      .filter(token => typeof token === "string")
+      .map(token => normalizeNameForMatch(token).trim()).filter(Boolean))];
+    const hits = tokens.filter(token => containsWords(cleanText, token)).length;
     const enough = tokens.length <= 2 ? hits === tokens.length : hits >= Math.min(3, tokens.length);
-    if (!enough) continue;
+    if (!tokens.length || !enough) continue;
     if (!isContractKeyLabel(rule.label)) continue;
     if (isBadKeyFieldValue(rule.label, rule.value, rule.snippet)) continue;
     const canonical = canonicalContractKeyLabel(rule.label).toLowerCase();
-    const exactValueInThisContract = textContainsValue(sourceText, rule.value);
-    const exactSourceInThisContract = rule.snippet && normalizeNameForMatch(sourceText).includes(normalizeNameForMatch(rule.snippet));
-    const exactProof = exactValueInThisContract || exactSourceInThisContract;
-    if (!exactProof) continue;
+    const exactValueInThisContract = containsWords(cleanText, rule.value);
+    const exactSourceInThisContract = rule.snippet && containsWords(cleanText, rule.snippet);
+    if (!exactValueInThisContract) continue;
     const existing = findContractKeyField(next, rule.label);
-    if (!existing || existing.value) continue;
-    const safeAutoLabels = new Set(["vendor", "facility", "category", "contract status"]);
+    if (existing?.value || existing?.approved) continue;
+    // Status is time-sensitive; never inherit it from another contract.
+    const safeAutoLabels = new Set(["vendor", "facility", "category"]);
     if (!safeAutoLabels.has(canonical)) continue;
+    const values = candidates.get(canonical) || new Map();
+    values.set(normalizeNameForMatch(rule.value), { rule, tokens, exactSourceInThisContract });
+    candidates.set(canonical, values);
+  }
+  for (const [canonical, values] of candidates) {
+    // Multiple supported values need a person to resolve, not rule-order precedence.
+    if (values.size !== 1) continue;
+    const { rule, tokens, exactSourceInThisContract } = values.values().next().value;
     const supportKey = `${canonical}|${normalizeNameForMatch(rule.value)}`;
-    const supportCount = supportCounts.get(supportKey) || 1;
+    const supportCount = supportCounts.get(supportKey)?.size || 1;
     const provenSnippet = exactSourceInThisContract
       ? rule.snippet
       : snippetAround(sourceText, sourceText.toLowerCase().indexOf(String(rule.value || "").toLowerCase()), 260);
     const confidence = supportCount >= 3 ? 88 : 62;
     const source = supportCount >= 3
-      ? `Auto-filled from ${supportCount} reviewed examples and proven in this contract.`
+      ? `Suggested from ${supportCount} prior contracts and found in this contract. Verify source before approval.`
       : "Suggested from prior correction and found in this contract. Verify source before approval.";
     addOrUpgradeField(next, rule.label, rule.value, confidence, source, provenSnippet || rule.snippet || tokens.join(", "));
   }
@@ -1824,10 +1873,10 @@ function listContracts({ q = "", page = 1, pageSize = 25, full = false, compact 
   const offset = (page - 1) * pageSize;
   const sortMode = String(sort || "").toLowerCase();
   const orderBy = sortMode === "name"
-    ? "lower(coalesce(json_extract(data, '$.name'), name, '')) ASC, created_at DESC, id DESC"
+    ? "lower(coalesce(name, '')) ASC, created_at DESC, id DESC"
     : "created_at DESC, id DESC";
   const ftsOrderBy = sortMode === "name"
-    ? "lower(coalesce(json_extract(c.data, '$.name'), c.name, '')) ASC, c.created_at DESC, c.id DESC"
+    ? "lower(coalesce(c.name, '')) ASC, c.created_at DESC, c.id DESC"
     : "c.updated_at DESC, c.created_at DESC, c.id DESC";
   if (hasQuery) {
     const terms = rawQuery
@@ -1845,7 +1894,7 @@ function listContracts({ q = "", page = 1, pageSize = 25, full = false, compact 
           JOIN (SELECT contract_id FROM contracts_fts WHERE contracts_fts MATCH ?) f ON f.contract_id = c.id
         `).get(ftsQuery).total;
         const rows = db.prepare(`
-          SELECT c.data
+          SELECT ${compact && !full ? "coalesce(c.compact_data, c.data) AS data" : "c.data"}
           FROM contracts c
           JOIN (SELECT contract_id FROM contracts_fts WHERE contracts_fts MATCH ?) f ON f.contract_id = c.id
           GROUP BY c.id
@@ -1861,14 +1910,14 @@ function listContracts({ q = "", page = 1, pageSize = 25, full = false, compact 
   }
   const query = `%${rawQuery.toLowerCase()}%`;
   const where = hasQuery
-    ? `WHERE lower(coalesce(name, '') || ' ' || coalesce(facility, '') || ' ' || coalesce(vendor, '') || ' ' || coalesce(category, '') || ' ' || coalesce(status, '') || ' ' || coalesce(data, '')) LIKE ?`
+    ? `WHERE lower(coalesce(name, '') || ' ' || coalesce(facility, '') || ' ' || coalesce(vendor, '') || ' ' || coalesce(category, '') || ' ' || coalesce(status, '')) LIKE ?`
     : "";
   const total = hasQuery
     ? db.prepare(`SELECT COUNT(*) AS total FROM contracts ${where}`).get(query).total
     : db.prepare("SELECT COUNT(*) AS total FROM contracts").get().total;
   const rows = hasQuery
-    ? db.prepare(`SELECT data FROM contracts ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`).all(query, pageSize, offset)
-    : db.prepare(`SELECT data FROM contracts ORDER BY ${orderBy} LIMIT ? OFFSET ?`).all(pageSize, offset);
+    ? db.prepare(`SELECT ${compact && !full ? "coalesce(compact_data, data) AS data" : "data"} FROM contracts ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`).all(query, pageSize, offset)
+    : db.prepare(`SELECT ${compact && !full ? "coalesce(compact_data, data) AS data" : "data"} FROM contracts ORDER BY ${orderBy} LIMIT ? OFFSET ?`).all(pageSize, offset);
   const records = rows.map(rowToRecord);
   return { total, page, pageSize, records: full ? records : records.map(compact ? contractCompactSummary : contractListSummary) };
 }
@@ -1892,6 +1941,10 @@ async function deleteContract(id) {
 
 function allContracts() {
   return db.prepare("SELECT data FROM contracts ORDER BY created_at DESC, id DESC").all().map(rowToRecord);
+}
+
+function allContractSummaries() {
+  return db.prepare("SELECT coalesce(compact_data, data) AS data FROM contracts ORDER BY created_at DESC, id DESC").all().map(rowToRecord);
 }
 
 function facilityProfileRecordType(profile = {}) {
@@ -1938,7 +1991,7 @@ function activeFinanceContracts() {
   const profiles = getAdminSettings().facilityProfiles || [];
   const seen = new Set();
   return db.prepare(`
-    SELECT data
+    SELECT coalesce(compact_data, data) AS data
     FROM contracts
     WHERE lower(trim(coalesce(status, ''))) = 'active'
     ORDER BY updated_at DESC, created_at DESC, id DESC
@@ -1966,10 +2019,10 @@ function reviewContracts(limit = 60, offset = 0) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 60, 100));
   const safeOffset = Math.max(0, Number(offset) || 0);
   return db.prepare(`
-    SELECT data
+    SELECT coalesce(compact_data, data) AS data
     FROM contracts
     WHERE ${reviewContractWhere}
-    ORDER BY updated_at DESC, created_at DESC, id DESC
+    ORDER BY coalesce(nullif(created_at, ''), updated_at) DESC, id DESC
     LIMIT ? OFFSET ?
   `).all(safeLimit, safeOffset).map(rowToRecord);
 }
@@ -2538,16 +2591,16 @@ function contractAlertDate(contract = {}) {
   };
 }
 
-function lifecycleAlerts(records = allContracts()) {
-  const windows = [90, 60, 30];
+function lifecycleAlerts(records = allContracts(), windows = [90, 60, 30]) {
   const alerts = [];
   for (const contract of records) {
+    if (/^(archived|expired|terminated|superseded|cancelled|canceled|inactive)$/i.test(String(contract.status || '').trim())) continue;
     const alertDate = contractAlertDate(contract);
     if (!alertDate) continue;
     const { targetDate, days } = alertDate;
     if (days === null || days < 0) continue;
-    const window = windows.find(item => days <= item && days > item - 30);
-    if (!window) continue;
+    const window = [...windows].sort((a,b) => a-b).find(item => days <= item);
+    if (window === undefined) continue;
     alerts.push({
       id: `ALERT-${contract.id}-${window}`,
       contractId: contract.id,
@@ -2587,17 +2640,20 @@ async function sendWebhookAlert(payload) {
 function smtpRead(socket) {
   return new Promise((resolve, reject) => {
     let buffer = "";
+    const timer = setTimeout(() => { onError(new Error('SMTP response timed out.')); socket.destroy(); }, 15000);
     const onData = chunk => {
       buffer += chunk.toString("utf8");
       const lines = buffer.split(/\r?\n/).filter(Boolean);
       const last = lines[lines.length - 1] || "";
       if (/^\d{3} /.test(last)) {
+        clearTimeout(timer);
         socket.off("data", onData);
         socket.off("error", onError);
         resolve(buffer);
       }
     };
     const onError = error => {
+      clearTimeout(timer);
       socket.off("data", onData);
       reject(error);
     };
@@ -2607,13 +2663,14 @@ function smtpRead(socket) {
 }
 
 async function smtpCommand(socket, command, expected = /^[23]/) {
+  const pendingResponse = smtpRead(socket);
   if (command) socket.write(`${command}\r\n`);
-  const response = await smtpRead(socket);
+  const response = await pendingResponse;
   if (!expected.test(response)) throw new Error(`SMTP command failed: ${response.trim()}`);
   return response;
 }
 
-async function sendSmtpMail({ to, subject, text }) {
+async function sendSmtpMail({ to, subject, text, html }) {
   if (!smtpHost || !to) return { configured: false, sent: false, provider: "smtp" };
   const envelopeFrom = (String(smtpFrom).match(/<([^>]+)>/)?.[1] || smtpFrom).trim();
   let socket = smtpPort === 465
@@ -2641,9 +2698,9 @@ async function sendSmtpMail({ to, subject, text }) {
     `To: ${to}`,
     `Subject: ${subject}`,
     "MIME-Version: 1.0",
-    "Content-Type: text/plain; charset=utf-8",
+    html ? "Content-Type: text/html; charset=utf-8" : "Content-Type: text/plain; charset=utf-8",
     "",
-    text.replace(/\r?\n\./g, "\n.."),
+    (html || text).replace(/\r?\n\./g, "\n.."),
     "."
   ].join("\r\n");
   await smtpCommand(socket, message);
@@ -2697,7 +2754,7 @@ async function sendLifecycleAlerts({ dryRun = false } = {}) {
   return { ...payload, sendResults };
 }
 
-function dashboardSummary(records = allContracts()) {
+function dashboardSummary(records = allContractSummaries()) {
   const active = records.filter(contract => contract.status === "Active").length;
   const renewalItems = records
     .map(contract => {
@@ -2873,7 +2930,7 @@ function financeSummary(records = activeFinanceContracts()) {
   };
 }
 
-function servicesSummary(records = allContracts()) {
+function servicesSummary(records = allContractSummaries()) {
   const settings = getAdminSettings();
   const serviceNames = new Set([...(settings.categories || [])].map(categoryCanonicalName).filter(Boolean));
   records.forEach(contract => {
@@ -2921,7 +2978,7 @@ function servicesSummary(records = allContracts()) {
   };
 }
 
-function adminSummary(records = allContracts()) {
+function adminSummary(records = allContractSummaries()) {
   const users = listUsers();
   const jobs = listOcrJobs({ limit: 100, lean: true });
   const tasks = listTasks();
@@ -7013,6 +7070,12 @@ function canonicalFacilityForFiling(name = "") {
 async function existingShareSyncFacilityFolder(root, facility) {
   const profile = facilityProfileForFiling(facility);
   const canonicalFacility = profile?.name || facility;
+  const preferred = preferredFacilityFolder(canonicalFacility) || preferredFacilityFolder(facility);
+  if (preferred) {
+    const stat = await fs.stat(path.join(root, preferred));
+    if (!stat.isDirectory()) throw new Error('Configured facility archive is not a folder.');
+    return preferred;
+  }
   const cleanFacility = sanitizeFolderSegment(canonicalFacility, "Needs Classification");
   const facilityKey = canonicalNameKey(cleanFacility);
   if (!root || !facilityKey) return cleanFacility;
@@ -8218,7 +8281,7 @@ function routeAction(url, method) {
   if (pathName.startsWith("/api/invoices")) return ["POST", "PATCH", "DELETE"].includes(method) ? "invoice" : "view";
   if (pathName.startsWith("/api/tasks")) return ["POST", "PATCH", "DELETE"].includes(method) ? "task" : "view";
   if (pathName === "/api/alerts/send") return "admin";
-  if (pathName === "/api/email/status" || pathName === "/api/email/test") return "admin";
+  if (pathName.startsWith("/api/email/")) return "admin";
   return ["POST", "PATCH", "DELETE"].includes(method) ? "edit" : "view";
 }
 
@@ -8848,6 +8911,7 @@ function searchContracts(contracts, query) {
 }
 
 initDatabase();
+initializeCompactContractIndex();
 seedAdminUser();
 await migrateJsonToSqlite();
 rebuildContractSearchIndex();
@@ -9104,6 +9168,12 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/email/status" && req.method === "GET") {
       return sendJson(res, smtpConfigurationStatus());
+    }
+    if (url.pathname === "/api/email/renewal-preview" && req.method === "POST") {
+      const settings = { ...getAdminSettings(), ...await readBody(req) };
+      const config = reminderSettings(settings);
+      const items = reminderItems(lifecycleAlerts(allContractSummaries(), config.days), settings);
+      return sendJson(res, { previews: config.recipients.map(email => { const scoped = recipientItems(items, settings, email); return {email, count:scoped.length, html:reminderHtml(scoped)}; }), configured: smtpConfigurationStatus().configured });
     }
 
     if (url.pathname === "/api/email/test" && req.method === "POST") {
@@ -10631,3 +10701,33 @@ server.listen(port, host, () => {
   const resumed = ocrResumeOnStart ? resumePendingOcrJobs() : 0;
   if (resumed) console.log(`Resumed ${resumed} queued OCR job${resumed === 1 ? "" : "s"}.`);
 });
+
+db.exec(`CREATE TABLE IF NOT EXISTS renewal_email_deliveries (delivery_key TEXT PRIMARY KEY, sent_at TEXT NOT NULL)`);
+let renewalEmailRunning = false;
+let lastRenewalCheckDay = '';
+async function checkRenewalEmailSchedule() {
+  if (renewalEmailRunning) return;
+  const today = new Date().toISOString().slice(0,10);
+  if (lastRenewalCheckDay === today) return;
+  renewalEmailRunning = true;
+  try {
+    const settings = getAdminSettings();
+    const config = reminderSettings(settings);
+    if (!config.enabled || !smtpConfigurationStatus().configured) return;
+    const items = reminderItems(lifecycleAlerts(allContractSummaries(), config.days), settings);
+    for (const recipient of config.recipients) {
+      const key = item => JSON.stringify([recipient, item.key]);
+      const pending = recipientItems(items, settings, recipient).filter(item => !db.prepare('SELECT 1 FROM renewal_email_deliveries WHERE delivery_key = ?').get(key(item)));
+      if (!pending.length) continue;
+      const result = await sendSmtpMail({ to: recipient, subject: `Your facilities: ${pending.length} contracts need renewal review`, text: reminderText(pending), html:reminderHtml(pending) });
+      if (!result.sent) throw new Error('Email provider did not accept the reminder.');
+      const insert = db.prepare('INSERT OR IGNORE INTO renewal_email_deliveries VALUES (?, ?)');
+      for (const item of pending) insert.run(key(item), new Date().toISOString());
+      logAudit('renewal_email_sent', 'email', recipient, { count: pending.length });
+    }
+    lastRenewalCheckDay = today;
+  } catch (error) {
+    logAudit('renewal_email_failed', 'email', 'scheduler', { error: error.message });
+  } finally { renewalEmailRunning = false; }
+}
+setInterval(checkRenewalEmailSchedule, 60000).unref();
